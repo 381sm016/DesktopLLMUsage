@@ -69,6 +69,7 @@ func (r *usageRow) update(u *UsageLimit, missingText string) {
 		r.resetLbl.SetText(missingText)
 		return
 	}
+	// Utilization is already a 0..100 percent, not a 0..1 fraction.
 	pct := int(u.Utilization + 0.5)
 	if pct > 100 {
 		pct = 100
