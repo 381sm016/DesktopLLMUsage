@@ -129,6 +129,17 @@ func runMain(cfg *Config) {
 	extra := &usageRow{}
 
 	var inFlight atomic.Bool
+	var ni *walk.NotifyIcon
+
+	updateTrayTooltip := func(d *UsageData) {
+		if ni == nil {
+			return
+		}
+		summary := fmt.Sprintf("Session %d%% • Weekly %d%%",
+			int(d.FiveHour.Utilization+0.5),
+			int(d.SevenDay.Utilization+0.5))
+		_ = ni.SetToolTip(summary)
+	}
 
 	doRefresh := func() {
 		if !inFlight.CompareAndSwap(false, true) {
@@ -155,8 +166,24 @@ func runMain(cfg *Config) {
 				design.update(data.IguanaNecktie, "not used")
 				extra.update(data.ExtraUsage, "none")
 				statusLbl.SetText("Updated " + time.Now().Format("15:04:05"))
+				updateTrayTooltip(data)
 			})
 		}()
+	}
+
+	openSettings := func() {
+		newCfg := editConfigDialog(mw, cfg)
+		if newCfg != nil {
+			cfg.SessionKey = newCfg.SessionKey
+			cfg.OrgID = newCfg.OrgID
+			client.SetCredentials(cfg.SessionKey, cfg.OrgID)
+			doRefresh()
+		}
+	}
+
+	showWindow := func() {
+		mw.Show()
+		win.SetForegroundWindow(mw.Handle())
 	}
 
 	mwDecl := MainWindow{
@@ -179,22 +206,8 @@ func runMain(cfg *Config) {
 				Children: []Widget{
 					Label{AssignTo: &statusLbl, Text: "Loading…"},
 					HSpacer{},
-					PushButton{
-						Text: "Settings",
-						OnClicked: func() {
-							newCfg := editConfigDialog(mw, cfg)
-							if newCfg != nil {
-								cfg.SessionKey = newCfg.SessionKey
-								cfg.OrgID = newCfg.OrgID
-								client.SetCredentials(cfg.SessionKey, cfg.OrgID)
-								doRefresh()
-							}
-						},
-					},
-					PushButton{
-						Text:      "Refresh",
-						OnClicked: func() { doRefresh() },
-					},
+					PushButton{Text: "Settings", OnClicked: openSettings},
+					PushButton{Text: "Refresh", OnClicked: doRefresh},
 				},
 			},
 		},
@@ -205,6 +218,22 @@ func runMain(cfg *Config) {
 	}
 
 	win.SetWindowPos(mw.Handle(), win.HWND_TOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE)
+
+	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
+		if reason == walk.CloseReasonUser {
+			*canceled = true
+			mw.Hide()
+		}
+	})
+
+	if err := installTrayIcon(mw, &ni, showWindow, doRefresh, openSettings); err != nil {
+		log.Printf("notify icon: %v", err)
+	}
+	defer func() {
+		if ni != nil {
+			ni.Dispose()
+		}
+	}()
 
 	doRefresh()
 
@@ -353,4 +382,59 @@ func editConfigDialog(owner walk.Form, current *Config) *Config {
 		return nil
 	}
 	return saved
+}
+
+func installTrayIcon(mw *walk.MainWindow, out **walk.NotifyIcon, onShow, onRefresh, onSettings func()) error {
+	ni, err := walk.NewNotifyIcon(mw)
+	if err != nil {
+		return err
+	}
+	if err := ni.SetIcon(walk.IconApplication()); err != nil {
+		return err
+	}
+	if err := ni.SetToolTip("Claude Usage"); err != nil {
+		return err
+	}
+
+	ni.MouseDown().Attach(func(_, _ int, button walk.MouseButton) {
+		if button != walk.LeftButton {
+			return
+		}
+		if mw.Visible() {
+			mw.Hide()
+		} else {
+			onShow()
+		}
+	})
+
+	addAction := func(text string, fn func()) error {
+		a := walk.NewAction()
+		if err := a.SetText(text); err != nil {
+			return err
+		}
+		a.Triggered().Attach(fn)
+		return ni.ContextMenu().Actions().Add(a)
+	}
+
+	if err := addAction("Show", onShow); err != nil {
+		return err
+	}
+	if err := addAction("Refresh", onRefresh); err != nil {
+		return err
+	}
+	if err := addAction("Settings…", onSettings); err != nil {
+		return err
+	}
+	if err := ni.ContextMenu().Actions().Add(walk.NewSeparatorAction()); err != nil {
+		return err
+	}
+	if err := addAction("Exit", func() { walk.App().Exit(0) }); err != nil {
+		return err
+	}
+
+	if err := ni.SetVisible(true); err != nil {
+		return err
+	}
+	*out = ni
+	return nil
 }
